@@ -1,0 +1,547 @@
+---
+title: "Performance of the 17 AI workflows compared to routine double reading"
+output:
+  word_document: 
+    number_sections: true
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(binom) # needed for stats
+library(boot) # needed for bootstrapping
+library(ggpubr)
+library(stringr)
+theme_set(theme_pubr())
+
+```
+
+This script calculates the performance of the 17 AI workflows compared to routine double reading.
+
+First, there are some transformations applied, enabling the subsequent statistical analyses. These include loading the data and functions, incorporating the exclusions, transforming the human reader opinions, and calculating the AI workflow recall opinions. 
+
+Second, the statistical analyses consist of calculating the performance of the human first and second readers, overall routine double reading, and of each AI workflow. This is followed by the non-inferiority & superiority tests, comparing the AI workflow to routine double reading using bootstrapping.
+
+Finally, a sensitivity analysis was performed to assess whether the results shown in the non-inferiority/superiority tests remained the same if less additional cancers were detected for the primary AI workflow.
+
+# Prepare data for evaluation
+
+## Load data
+
+```{r load-data}
+data <- readRDS("evaluation_dataset.rds")
+
+## stats functions
+source("calc-performance-functions.R")
+source("bootstrap-functions.R")
+```
+
+
+## Create evaluation dataset
+
+```{r}
+# exclude Review (Symptoms)
+# exclude cases impacted by the IT error: Mia_read_pre_fix == 1
+# exclude missing AI opinions: !is.na(Mia.Casewise.Raw.Score)
+# exclude Technical Recalls
+
+df <- data %>% 
+  filter(Overall.opinion != "Review (Symptoms)", 
+         Reader.1.opinion != "Review (Symptoms)",
+         Reader.2.opinion != "Review (Symptoms)",
+         Reader.1.opinion == "Review Required" | Reader.1.opinion == "Routine Recall",
+         Mia_read_pre_fix == 1,
+         !is.na(Mia.Casewise.Raw.Score),
+         Reader.1.opinion != "Technical Recall",
+         Reader.2.opinion != "Technical Recall")
+
+```
+
+## Transform human reader opinions
+
+```{r}
+# convert human reader opinions to 1 ("recall") and 0 ("no recall")
+# R1, R2, R3: first, second and third human reader respectively
+# DR: routine double reading
+# R2_read/R3_read: marker indicating whether R2/R3 read the case
+df <- df %>% 
+  mutate(R1 = case_when(Reader.1.opinion == "Review Required" ~ 1, 
+                        Reader.1.opinion == "Routine Recall" ~ 0,
+                        TRUE ~ NA_real_),
+         R2 = case_when(Reader.2.opinion == "Review Required" ~ 1, 
+                        Reader.2.opinion == "Routine Recall" ~ 0,
+                        TRUE ~ NA_real_),
+         R3 = case_when(Reader.3.opinion == "Review Required" ~ 1, 
+                        Reader.3.opinion == "Routine Recall" ~ 0,
+                        TRUE ~ NA_real_),
+         DR = case_when(Overall.opinion == "Review Required" ~ 1, 
+                        Overall.opinion == "Routine Recall" ~ 0,
+                        TRUE ~ NA_real_)) %>% 
+  mutate(R2_read = if_else(!is.na(R2), 1, 0),
+         R3_read = if_else(!is.na(R3), 1, 0))
+  
+```
+
+
+## Set AI operating points
+
+```{r}
+
+# 4 operating points
+OP1 <- 0.557
+OP2 <- 0.4829
+OP3 <- 0.3957
+OP4 <- 0.2248
+
+OPs <- c(OP1, OP2, OP3, OP4)
+
+# convert raw AI score to "recall" (1) or "no recall" opinion (0)
+
+df$Mia_OP1 <- ifelse(df$Mia.Casewise.Raw.Score >= OP1, 1, 0)
+df$Mia_OP2 <- ifelse(df$Mia.Casewise.Raw.Score >= OP2, 1, 0)
+df$Mia_OP3 <- ifelse(df$Mia.Casewise.Raw.Score >= OP3, 1, 0)
+df$Mia_OP4 <- ifelse(df$Mia.Casewise.Raw.Score >= OP4, 1, 0)
+
+```
+
+## Calculate AI workflow recall opinions
+
+```{r workflows}
+
+# the below code uses across to to the following: for each column that starts
+##  with Mia_recall, perform the case_when statement, and name the columns
+
+# the code calculates recall opinions for the triage workflows (triage:
+##  "Triage"; triage negatives: "Tneg") and the AI-additional read workflows
+##  (eXtra Read: "XR")
+
+# the code also determines, for each AI workflow, whether the human reader (1, 2
+##  or 3) would have read the case
+
+df <- df %>% 
+  # determines recall opinion for workflows Tneg OP2 to 4
+  mutate(across(c("Mia_OP2", "Mia_OP3", "Mia_OP4"),
+                ~ case_when(R1 == .x & R1 == 0 ~ R1,
+                            R1 == R2 ~ R1,
+                            R1 != R2 ~ R3,
+                            TRUE ~ NA_real_),
+                .names = "Tneg_{.col}"),
+         # determines recall opinion for workflows Triage OP1 and 2
+         across(c("Mia_OP1", "Mia_OP2"),
+                ~ case_when(R1 == .x ~ R1,
+                            R1 == R2 ~ R1,
+                            R1 != R2 ~ R3,
+                            TRUE ~ NA_real_),
+                .names = "Triage_{.col}"),
+         # determines recall opinion for XR workflows OP1 and 2
+         across(c("Mia_OP1", "Mia_OP2"),
+                ~ case_when(XR_recall == 1 & .x == 1 ~ 1,
+                            !(XR_recall == 1 & .x == 1) ~ 0,
+                            Mia_read_pre_fix == 1 ~ 0,
+                            TRUE ~ NA_real_),
+                .names = "XR_{.col}"),
+         # determines whether a case was read by the second reader (R2) for Tneg workflows OP2 to 4
+         across(c("Mia_OP2", "Mia_OP3", "Mia_OP4"),
+                ~ case_when(R1 == 1 | .x == 1 ~ 1,
+                            TRUE ~ 0),
+                .names = "R2_read_Tneg_{.col}"),
+         # determines whether a case was read by the third reader (R3) for Tneg workflows OP2 to 4
+         across(c("R2_read_Tneg_Mia_OP2", "R2_read_Tneg_Mia_OP3", "R2_read_Tneg_Mia_OP4"),
+                ~ case_when(.x == 1 & R1 != R2 ~ 1,
+                            TRUE ~ 0),
+                .names = "R3_{.col}"),
+         # determines whether a case was read by R2 for Triage workflows OP1 and 2
+         across(c("Mia_OP1", "Mia_OP2"),
+                ~ case_when(R1 != .x ~ 1,
+                            TRUE ~ 0),
+                .names = "R2_read_Triage_{.col}"),
+         # determines whether a case was read by R3 for Triage workflows OP1 and 2
+         across(c("R2_read_Triage_Mia_OP1", "R2_read_Triage_Mia_OP2"),
+                ~ case_when(.x == 1 & R1 != R2 ~ 1,
+                            TRUE ~ 0),
+                .names = "R3_{.col}"),
+         # determines whether a case was additionally read (XR) at OP1 and 2
+         across(c("Mia_OP1", "Mia_OP2"),
+                ~ case_when(Discordance == "positive" & .x == 1 ~ 1,
+                            !(Discordance == "positive" & .x == 1) ~ 0,
+                            Mia_read_pre_fix == 1 ~ 0,
+                            TRUE ~ NA_real_),
+                .names = "XR_read_{.col}"),
+         # determines whether a case was additionally read (XR) following Triage workflows at OP1 and 2
+         across(c("Mia_OP1", "Mia_OP2"),
+                ~ case_when(Triage_Mia_OP1 == 0 & .x == 1 ~ 1,
+                            !(Discordance == "positive" & .x == 1) ~ 0,
+                            Mia_read_pre_fix == 1 ~ 0,
+                            TRUE ~ NA_real_),
+                .names = "XR_read_Triage_{.col}"))
+
+# the above code keeps the R2 for R3_read columns.
+# the below code removes this
+colnames(df) = gsub("R3_R2", "R3", colnames(df))
+
+
+# overall recall opinion for the triage negatives + AI-additional read combination workflows
+df <- df %>% 
+  mutate(Tneg_XR_A2_A2 = if_else(Tneg_Mia_OP2 == 1 | XR_Mia_OP2 == 1, 1, 0),
+         Tneg_XR_A2_A1 = if_else(Tneg_Mia_OP2 == 1 | XR_Mia_OP1 == 1, 1, 0),
+         Tneg_XR_A3_A2 = if_else(Tneg_Mia_OP3 == 1 | XR_Mia_OP2 == 1, 1, 0),
+         Tneg_XR_A3_A1 = if_else(Tneg_Mia_OP3 == 1 | XR_Mia_OP1 == 1, 1, 0),
+         Tneg_XR_A4_A2 = if_else(Tneg_Mia_OP4 == 1 | XR_Mia_OP2 == 1, 1, 0),
+         Tneg_XR_A4_A1 = if_else(Tneg_Mia_OP4 == 1 | XR_Mia_OP1 == 1, 1, 0))
+
+# overall recall opinion for the Triage + AI-additional read combination workflows
+df <- df %>% 
+  mutate(Triage_XR_A1_A2 = if_else(Triage_Mia_OP1 == 1 | XR_Mia_OP2 == 1, 1, 0),
+         Triage_XR_A1_A1 = if_else(Triage_Mia_OP1 == 1 | XR_Mia_OP1 == 1, 1, 0),
+         Triage_XR_A2_A2 = if_else(Triage_Mia_OP2 == 1 | XR_Mia_OP2 == 1, 1, 0),
+         Triage_XR_A2_A1 = if_else(Triage_Mia_OP2 == 1 | XR_Mia_OP1 == 1, 1, 0)) 
+
+# overall recall opinion for the routine double reading in combination with the AI-additional read workflows
+df <- df %>% 
+  mutate(DR_XR_A1 = if_else(DR == 1 | XR_Mia_OP1 == 1, 1, 0),
+         DR_XR_A2 = if_else(DR == 1 | XR_Mia_OP2 == 1, 1, 0))
+
+```
+
+
+# Performance of Reader 1, Reader 2, and double reading
+
+```{r}
+
+R1_performance <- calc_performance(df$R1, df$cancer)
+
+R2_performance <- calc_performance(df$R2, df$cancer)
+
+DR_performance <- calc_performance(df$DR, df$cancer, df$R2_read, df$R3_read)
+
+reader <- c("Reader 1", "Reader 2", "Double Reading")
+
+table <- rbind(R1_performance, R2_performance, DR_performance)
+
+table <- cbind(reader, table)
+colnames(table)[1] <- ""
+table["workload reduction"] <- "0%"
+
+knitr::kable(table)
+
+```
+CDR, cancer detection rate; RR, recall rate; sens, sensitivity; spec, specificity; PPV, positive predictive value.
+
+# AI performance
+
+## Triage Negatives workflows
+
+The AI is used as the second reader when Reader 1 & the AI agree not to recall.
+
+```{r}
+# operating points (OPs) used for the triage negatives workflow
+OPs_Tneg <- c(2:4)
+
+# print table with performance of the triage negatives workflow for OPs 2 to 4
+knitr::kable(calc_SA_WF(df, OPs_Tneg, "Tneg"))
+```
+
+CDR, cancer detection rate; RR, recall rate; sens, sensitivity; spec, specificity; PPV, positive predictive value; OP, operating point.
+
+
+## Triage workflows
+
+The AI is used as the second reader when the AI and Reader 1.
+
+```{r}
+# operating points (OPs) used for the triage workflow
+OPs_Triage <- c(1:2)
+
+# print table with performance of the triage workflow for OPs 1 to 2
+knitr::kable(calc_SA_WF(df, OPs_Triage, "Triage"))
+```
+CDR, cancer detection rate; RR, recall rate; sens, sensitivity; spec, specificity; PPV, positive predictive value; OP, operating point.
+
+
+## AI-Additional Read workflows
+
+AI-Additional Read workflows in combination with routine double reading. Mammograms went through additional arbitration if the AI suggested recall, but routine double reading did not recall the woman.
+
+
+```{r}
+# operating points (OPs) used for AI-Additional_Read workflow
+OPs_XR <- c(1:2)
+
+# print table with performance of the AI-Additional Read workflows in
+##  combination with routine double reading for OPs 1 to 2
+knitr::kable(calc_SA_WF(df, OPs_XR, "XR"))
+```
+CDR, cancer detection rate; RR, recall rate; sens, sensitivity; spec, specificity; PPV, positive predictive value; OP, operating point.
+
+
+## Combinations of Triage Negatives + AI-Additional Read
+
+```{r}
+# print table with performance of the combination workflows (triage negatives, 
+##  OPs 2:4; AI-Additional Read, OPs 1:2)
+knitr::kable(calc_combo_WF(df, OPs_Tneg, OPs_XR, "Tneg"))
+```
+CDR, cancer detection rate; RR, recall rate; sens, sensitivity; spec, specificity; PPV, positive predictive value; OP, operating point. The first OP relates to the Triage Negatives workflow; the second to AI-Additional Read.
+
+
+## Combinations of Triage + AI-Additional Read
+
+```{r}
+# print table with performance of the combination workflows (triage, OPs 2:4;
+##  AI-Additional Read, OPs 1:2)
+knitr::kable(calc_combo_WF(df, 1:2, 1:2, "Triage"))
+```
+CDR, cancer detection rate; RR, recall rate; sens, sensitivity; spec, specificity; PPV, positive predictive value; OP, operating point. The first OP relates to the Triage workflow; the second to AI-Additional Read.
+
+# Non-inferiority & superiority tests
+
+Comparing the 10 combination workflows to routine double reading.
+
+## Create csv file for output and specify workflows
+
+```{r}
+# csv to which bootstrap results are written to
+csv_fname = "bootstrap.csv"
+
+# csv specify column names
+data = data.frame('workflow', 'measure', 'CI', 'lower', 'upper')
+
+write.table(data, file = csv_fname,
+            sep = ",", quote = FALSE,
+            col.names = FALSE, row.names = FALSE)
+
+# find combination workflow names in dataframe df
+workflows <- c(colnames(df)[grepl("Triage_XR|Tneg_XR", colnames(df))])
+```
+
+## Cancer detection rate
+
+```{r}
+# calculate two-sided 80% and 90% confidence intervals (CI) with bootstrapping
+##  for cancer detection rate (CDR)
+CI_range <- c(0.80, 0.90)
+for(workflow in workflows){
+  boot_csv <- read.csv(csv_fname)
+  # if the workflow does not already exist in the file
+  if(!grepl(workflow, toString(boot_csv$workflow))){
+    # generate repetitions (reps) 
+    reps <- boot(data.frame(df[workflow], df$DR, df$cancer), calc_CDR_boot, R = 50000, parallel = "snow", ncpus = 4)
+    # calculate the CIs
+    rows <- boot_CI(reps, workflow, "CDR", CI_range)
+    
+    write.table(rows, file = csv_fname, sep = ",",
+                append = TRUE, quote = FALSE,
+                col.names = FALSE, row.names = FALSE)
+    }
+  }
+```
+
+
+## Recall rate
+
+```{r}
+# calculate two-sided 80% and 90% confidence intervals (CI) with bootstrapping
+##  for recall rate (RR)
+for(workflow in workflows){
+  reps <- boot(data.frame(df[workflow], df$DR), calc_RR_boot, R = 50000, parallel = "snow", ncpus = 4)
+  rows <- boot_CI(reps, workflow, "RR", CI_range)
+
+  write.table(rows, file = csv_fname, sep = ",",
+              append = TRUE, quote = FALSE,
+              col.names = FALSE, row.names = FALSE)
+}
+```
+
+## Sensitivity
+
+```{r}
+# calculate two-sided 80% and 90% confidence intervals (CI) with bootstrapping
+##  for sensitivity (sens)
+for(workflow in workflows){
+  reps <- boot(data.frame(df[workflow], df$DR, df$cancer), calc_sens_boot, R = 50000, parallel = "snow", ncpus = 4)
+  rows <- boot_CI(reps, workflow, "sens", CI_range)
+  
+  write.table(rows, file = csv_fname, sep = ",",
+              append = TRUE, quote = FALSE,
+              col.names = FALSE, row.names = FALSE)
+  }
+```
+
+
+
+## Specificity
+
+```{r}
+# calculate two-sided 80% and 90% confidence intervals (CI) with bootstrapping
+##  for specificity (spec)
+for(workflow in workflows){
+  reps <- boot(data.frame(df[workflow], df$DR, df$cancer), calc_spec_boot, R = 50000, parallel = "snow", ncpus = 4)
+  rows <- boot_CI(reps, workflow, "spec", CI_range)
+    
+  write.table(rows, file = csv_fname, sep = ",",
+              append = TRUE, quote = FALSE,
+              col.names = FALSE, row.names = FALSE)
+  }
+```
+
+
+
+## Positive predictive value
+
+```{r}
+# calculate two-sided 80% and 90% confidence intervals (CI) with bootstrapping
+##  for positive predictive value (PPV)
+for(workflow in workflows){
+  reps <- boot(data.frame(df[workflow], df$DR, df$cancer), calc_PPV_boot, R = 50000, parallel = "snow", ncpus = 4)
+  rows <- boot_CI(reps, workflow, "PPV", CI_range)
+  
+  write.table(rows, file = csv_fname, sep = ",",
+              append = TRUE, quote = FALSE,
+              col.names = FALSE, row.names = FALSE)
+  }
+```
+
+
+# Relative change
+
+Calculate relative change for all AI workflows compared to routine double reading
+
+```{r}
+# remaining standalone workflows
+SA_workflows <- c(colnames(df)[grepl("\\b(Triage_Mia|Tneg_Mia|DR_XR_)", colnames(df))])
+
+# combine combination workflows with standalone workflows
+all_workflows <- c(workflows, SA_workflows)
+
+table <- data.frame()
+for(workflow in all_workflows){
+  rel_change <- calc_rel_change(df[[workflow]], df$DR, df$cancer)
+
+  table <- rbind(table, rel_change)
+}
+table <- round(table, 1)
+table <- cbind(all_workflows, table)
+
+knitr::kable(table)
+
+```
+# CIs for relative differences
+
+
+## Cancer detection rate
+```{r}
+# calculate two-sided 90% CIs for remaining standalone workflows for CDR
+
+for(workflow in SA_workflows){
+  boot_csv <- read.csv(csv_fname)
+  reps <- boot(data.frame(df[workflow], df$DR, df$cancer), calc_CDR_boot, R = 50000, parallel = "snow", ncpus = 4)
+  rows <- boot_CI(reps, workflow, "CDR", CI_range)
+  
+  write.table(rows, file = csv_fname, sep = ",",
+              append = TRUE, quote = FALSE,
+              col.names = FALSE, row.names = FALSE)
+  }
+```
+
+## Recall rate
+
+```{r}
+# calculate two-sided 90% CIs for remaining standalone workflows for RR
+
+for(workflow in SA_workflows){
+  reps <- boot(data.frame(df[workflow], df$DR), calc_RR_boot, R = 50000, parallel = "snow", ncpus = 4)
+  rows <- boot_CI(reps, workflow, "RR", CI_range)
+
+  write.table(rows, file = csv_fname, sep = ",",
+              append = TRUE, quote = FALSE,
+              col.names = FALSE, row.names = FALSE)
+}
+```
+
+
+## Sensitivity
+
+```{r}
+# calculate two-sided 90% CIs for remaining standalone workflows for sensitivity
+for(workflow in SA_workflows){
+  reps <- boot(data.frame(df[workflow], df$DR, df$cancer), calc_sens_boot, R = 50000, parallel = "snow", ncpus = 4)
+  rows <- boot_CI(reps, workflow, "sens", CI_range)
+  
+  write.table(rows, file = csv_fname, sep = ",",
+              append = TRUE, quote = FALSE,
+              col.names = FALSE, row.names = FALSE)
+  }
+```
+
+
+
+## Specificity
+
+```{r}
+# calculate two-sided 90% CIs for remaining standalone workflows for specificity
+for(workflow in SA_workflows){
+  reps <- boot(data.frame(df[workflow], df$DR, df$cancer), calc_spec_boot, R = 50000, parallel = "snow", ncpus = 4)
+  rows <- boot_CI(reps, workflow, "spec", CI_range)
+    
+  write.table(rows, file = csv_fname, sep = ",",
+              append = TRUE, quote = FALSE,
+              col.names = FALSE, row.names = FALSE)
+  }
+```
+
+
+## Positive predictive value
+
+```{r}
+# calculate two-sided 90% CIs for remaining standalone workflows for PPV
+for(workflow in SA_workflows){
+  reps <- boot(data.frame(df[workflow], df$DR, df$cancer), calc_PPV_boot, R = 50000, parallel = "snow", ncpus = 4)
+  rows <- boot_CI(reps, workflow, "PPV", CI_range)
+  
+  write.table(rows, file = csv_fname, sep = ",",
+              append = TRUE, quote = FALSE,
+              col.names = FALSE, row.names = FALSE)
+}
+```
+
+
+# Sensitivity analysis
+
+```{r}
+CI_range <- c(0.80, 0.90)
+
+# dataframe with only the additionally detected cancers
+df_XR_cancers <- df[df$cancer_XR == 1,]
+
+# change from cancer (1) to no cancer (0)
+df_sens <- df %>% 
+  mutate(cancer = if_else(DaSH550_AccessionNumber %in% df_XR_cancers$DaSH550_AccessionNumber[1:3], 0, cancer))
+
+# primary workflow (triage negatives at OP3 + AI-Additional Read at OP2)
+workflow <- "Tneg_XR_A3_A2"
+
+# calculate 80% and 90% confidence intervals for cancer detection rate, recall,
+##  rate, sensitivity, specificity, positive predictive value, and workload
+
+rows <- data.frame()
+
+reps <- boot(data.frame(df_sens[workflow], df_sens$DR, df_sens$cancer), calc_CDR_boot, R = 50000, parallel = "snow", ncpus = 4)
+rows <- rbind(rows, boot_CI(reps, workflow, "CDR", CI_range))
+
+reps <- boot(data.frame(df[workflow], df$DR), calc_RR_boot, R = 50000, parallel = "snow", ncpus = 4)
+rows <- rbind(rows, boot_CI(reps, workflow, "RR", CI_range))
+
+reps <- boot(data.frame(df[workflow], df$DR, df$cancer), calc_sens_boot, R = 50000, parallel = "snow", ncpus = 4)
+rows <- rbind(rows, boot_CI(reps, workflow, "sens", CI_range))
+
+reps <- boot(data.frame(df[workflow], df$DR, df$cancer), calc_spec_boot, R = 50000, parallel = "snow", ncpus = 4)
+rows <- rbind(rows, boot_CI(reps, workflow, "spec", CI_range))
+
+reps <- boot(data.frame(df[workflow], df$DR, df$cancer), calc_PPV_boot, R = 50000, parallel = "snow", ncpus = 4)
+rows <- rbind(rows, boot_CI(reps, workflow, "PPV", CI_range))
+
+print(rows)
+```
+

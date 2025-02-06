@@ -1,0 +1,411 @@
+---
+title: "Gemini paper - Demographics and further analyses"
+output:
+  word_document:
+    number_sections: true
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(binom) # needed for stats
+library(ggplot2)
+library(ggpubr)
+theme_set(theme_pubr())
+```
+
+
+This script calculates numbers excluded from the analysis per category, demographic information, detailed information on the cancers detected and on the additionally arbitrated cases.
+
+# Load data and define AI operating points
+
+```{r load-data}
+data <- readRDS("evaluation_dataset.rds")
+
+## stats functions
+source("calc-performance-functions.R")
+
+## 4 operating points
+OP1 <- 0.557
+OP2 <- 0.4829
+OP3 <- 0.3957
+OP4 <- 0.2248
+
+OPs <- c(OP1, OP2, OP3, OP4)
+```
+
+# Exclusions
+
+## Full dataset minus opt-outs
+
+```{r}
+df <- data
+
+nrow(df)
+```
+
+## Minus technical recalls
+
+```{r}
+# remove tech recalls for individual reader opinions
+# remove tech recalls for final screen decision
+df <- df %>% 
+  filter(Reader.1.opinion != "Technical Recall",
+         Reader.2.opinion != "Technical Recall",
+         Reader.3.opinion != "Technical Recall",
+         SBSS.Final.Decision != "TECH_RECALL" | is.na(SBSS.Final.Decision))
+
+nrow(df)
+  
+```
+
+### Comparison between cases affected and not affected by the IT error - cancer detection rate 
+
+```{r}
+# DR: double reading
+print("Cancer detection rate for the unaffected cases [per thousand]")
+sum(df$cancer_DR[df$potential_read_pre_fix == 1])/(sum(df$potential_read_pre_fix))*1000
+
+print("Cancer detection rate for the affected cases [per thousand]")
+sum(df$cancer_DR[df$potential_read_pre_fix == 0])/(sum(df$potential_read_pre_fix == 0))*1000
+
+chisq.test(table(df$cancer_DR, df$potential_read_pre_fix))
+
+```
+
+### Comparison between cases affected and not affected by the IT error - recall rate
+
+```{r}
+# RR: recall rate
+df_RR <- df %>% 
+  mutate(DR = case_when(Overall.opinion == "Review Required" ~ 1, 
+                        Overall.opinion == "Routine Recall" ~ 0,
+                        TRUE ~ NA_real_)) %>% 
+  filter(Overall.opinion == "Review Required" | Overall.opinion == "Routine Recall")
+
+# potential_read_pre_fix: cases which had the potential to be additionally AI
+##  read (i.e. cases affected by the IT error, 0: yes, 1: no)
+print("Recall rate for the unaffected cases [%]")
+sum(df_RR$DR[df_RR$potential_read_pre_fix == 1])/(sum(df_RR$potential_read_pre_fix))*100
+
+print("Recall rate for the affected cases [%]")
+sum(df_RR$DR[df_RR$potential_read_pre_fix == 0])/(sum(df_RR$potential_read_pre_fix == 0))*100
+
+chisq.test(table(df_RR$DR, df_RR$potential_read_pre_fix))
+
+```
+
+### Mean age for cases affected and not affected by the IT error
+
+```{r}
+
+print("Mean age for the unaffected cases [%]")
+median(df$Age[df$potential_read_pre_fix == 1])
+
+print("Recall rate for the affected cases [%]")
+median(df$Age[df$potential_read_pre_fix == 0])
+
+```
+
+## Minus IT error issue
+
+```{r}
+df <- df %>% 
+  filter(potential_read_pre_fix == 1)
+
+nrow(df)
+
+```
+
+
+### Comparison between cases read and not read by the AI - cancer detection rate 
+
+```{r, eval = FALSE}
+
+# Mia_read_pre_fix: read by the AI prior to the IT error fix
+print("Cancer detection rate for the read cases [per thousand]")
+sum(df$cancer_DR[df$Mia_read_pre_fix == 1])/(sum(df$Mia_read_pre_fix))*1000
+
+print("Cancer detection rate for the cases not read [per thousand]")
+sum(df$cancer_DR[df$Mia_read_pre_fix == 0])/(sum(df$Mia_read_pre_fix == 0))*1000
+
+chisq.test(table(df$cancer_DR, df$Mia_read_pre_fix))
+
+```
+
+
+## Minus AI exclusions
+
+```{r}
+df <- df %>% 
+  filter(Mia_read_pre_fix == 1)
+
+nrow(df)
+```
+
+## Minus Review Symptoms
+
+```{r}
+# remove if reader 1, 2 or 3 have a Review (Symptoms) opinion
+df <- df %>% 
+  filter(Reader.1.opinion != "Review (Symptoms)",
+         Reader.2.opinion != "Review (Symptoms)",
+         Reader.3.opinion != "Review (Symptoms)")
+
+nrow(df)
+```
+
+# Demographics
+
+## Age
+
+```{r}
+# categorise age and create a summary table
+df <- df %>% 
+  mutate(age_cat = cut(Age,
+                       breaks = c(50, 55, 60, 65, 70, 90), right = FALSE))
+
+table(df$age_cat)
+```
+
+## Special Requirements
+
+```{r}
+
+# spec_req: special requirements of a woman attending for breast screening
+df$spec_req <- gsub(',', '', df$Special.requirement.list)
+
+# N_req: number of special requirements
+df <- df %>%
+  mutate(N_req = nchar(spec_req))# %>% 
+
+table(df$N_req)
+
+# create dataframe of cases with exactly one special requirement
+df_req_1 <- df %>% 
+  filter(Special.requirement == "Yes",
+         N_req == 1)
+
+table(df_req_1$Special.requirement.list)
+```
+
+## Screen-detected breast cancers
+
+### Size
+
+```{r}
+# dataframe which only contains cases diagnosed with a cancer through routine
+##  double reading
+df_cancer <- filter(df, cancer_DR == 1)
+
+table(df_cancer$cancer_size_cat, useNA = "ifany")
+```
+
+### invasive/DCIS
+
+```{r}
+table(df_cancer$cancer_type)
+```
+
+
+### ER status
+
+```{r}
+# dataframe which only contains invasive cancer cases (receptor status is not
+##  assessed for non-invasive cases)
+df_receptor <- df_cancer %>% 
+  filter(cancer_type == "invasive")
+
+table(df_receptor$ER.Status, useNA = "ifany")
+```
+
+### PR status
+
+```{r}
+table(df_receptor$PgR.Status, useNA = "ifany")
+```
+
+### HER2 status
+
+```{r}
+table(df_receptor$HER2.Status, useNA = "ifany")
+```
+
+### Triple negative
+
+```{r}
+# triple negative cancer: PgR, ER and HER2 are negative
+sum(df_receptor$PgR.Status == "Negative" & df_receptor$ER.Status == "Negative" & df_receptor$HER2.Status == "Negative", na.rm = TRUE)
+```
+
+# AI standalone recall rate [%] at OP2
+
+```{r Mia-standalone}
+# convert raw AI score to recall opinion (1 is yes; 0 is no)
+df$Mia_OP2 <- ifelse(df$Mia.Casewise.Raw.Score >= OP2, 1, 0)
+
+round(sum(df$Mia_OP2 == 1)/nrow(df)*100, 1)
+```
+
+
+# AI Additional-Read detected cancers
+
+There are `r sum(df$cancer_XR == 1)` cancers detected with the support of AI.
+
+## Size
+
+```{r}
+# XR: additionally (eXtra) Read
+# dataframe which only contains XR cancer cases
+df_XR_cancer <- filter(df, cancer_XR == 1)
+table(df_XR_cancer$XR_size, useNA = "ifany")
+```
+
+## Invasive
+
+```{r}
+# dataframe which only contains invasive XR cancer cases (receptor status is not
+##  assessed for non-invasive cases)
+table(df_XR_cancer$Invasive == "y")
+```
+
+
+## ER status
+
+```{r}
+df_XR_receptor <- df_XR_cancer %>% 
+  filter(Invasive == "y")
+
+table(df_XR_receptor$XR_ER, useNA = "ifany")
+```
+
+## PR status
+
+```{r}
+table(df_XR_receptor$XR_PR, useNA = "ifany")
+```
+
+## HER2 status
+
+```{r}
+table(df_XR_receptor$XR_HER2, useNA = "ifany")
+```
+
+## Triple negative
+
+```{r}
+sum(df_XR_receptor$XR_PR == "negative" & df_XR_receptor$XR_ER == "negative" & df_XR_receptor$XR_HER2 == "Negative", na.rm = TRUE)
+```
+
+# Additionally arbitrated cases
+
+## Arbitration time
+
+```{r}
+# group the numbers together as some were recorded with a range (e.g. 60-120),
+##  while other cases had an exact number recorded
+
+# Discordance: cases eligible for the live AI-Additional Read workflow, i.e.
+##  not recalled by routine double reading but flagged by the AI at OP2
+
+df_time <- df %>% 
+  mutate(XR_time = recode(df$arbitration.discussion.time..secs.,
+                          "0-30" = "15",
+                          "30-60" = "45",
+                          "60-120" = "90",
+                          "120-300" = "210")) %>% 
+  mutate(XR_time = as.integer(XR_time)) %>% 
+  mutate(XR_time_cat = cut(XR_time,
+                       breaks = c(0, 30, 60, 120, 300))) %>% 
+  filter(Discordance == "positive")
+
+```
+
+### Categorised by recall decision:
+
+```{r}
+table(df_time$XR_time_cat, df_time$XR_recall, useNA = "ifany")
+test <- table(df_time$XR_time_cat, df_time$XR_recall, useNA = "ifany")
+
+prop.trend.test(test[,1], test[,1]+test[,2])
+```
+
+### Categorised by cancer diagnosis:
+
+```{r}
+
+table(df_time$XR_time_cat, df_time$cancer, useNA = "ifany")
+
+```
+
+
+## Reason for no recall following additional review
+
+```{r}
+# recode duplicate (similar but not the same) coding
+
+df <- df %>% 
+  mutate(Reason.for.no.recall...primary = recode(df$Reason.for.no.recall...primary,
+                                                 "Low-lying LN" = "low-lying LN",
+                                                 "No lesion seen" = "no lesions seen",
+                                                 "Previous biopsy" = "previous biopsy",
+                                                 "Previous screening film" = "previous screening film",
+                                                 "Previous surgery" = "previous surgery",
+                                                 "Previous symptomatic films" = "previous symptomatic",
+                                                 "Vascular" = "vascular",
+                                                 "Well defined" = "well-defined"))
+
+table(df$Reason.for.no.recall...primary)
+```
+
+## Additional AI-detected cancers
+
+### Grade
+```{r}
+# grade_comb: cancer grade combined
+# remainder are DCIS
+df <- df %>% 
+  mutate(Grade_comb = case_when(
+    Grade1 == 2 ~ "Grade 2",
+    Grade1 == 3 ~ "Grade 3",
+    cancer_XR == 1 ~ "DCIS"
+  ))
+
+# Grade of tumour
+table(df$Grade_comb)
+
+```
+### Grade of DCIS
+
+```{r}
+
+# create dataframe of XR non-invasive cancer cases (ductal carcinoma in situ: DCIS)
+# convert "intermediate to high" grade to avoid small numbers in output which may impact patient confidentiality
+
+df_XR_DCIS <- df %>% 
+  filter(Cancer.Yes.No == "y" | Cancer.Yes.No == "Y",
+         Invasive != "y") %>% 
+  mutate(Grade = case_when(
+    Grade == "intermediate to high" ~ "High",
+    TRUE ~ Grade
+  ))
+
+table(df_XR_DCIS$Grade)
+
+```
+
+### How many additionally detected cancers had already gone through arbitration?
+
+```{r}
+
+# create dataframe of additionally detected cancer cases that had already gone through regular arbitration
+
+df_XR_arbitration <- df %>% 
+  filter(!is.na(Grade_comb),
+         Reader.3.opinion != "")
+  
+nrow(df_XR_arbitration)
+
+```
