@@ -127,23 +127,6 @@ nrow(df)
 
 ```
 
-
-### Comparison between cases read and not read by the AI - cancer detection rate 
-
-```{r, eval = FALSE}
-
-# Mia_read_pre_fix: read by the AI prior to the IT error fix
-print("Cancer detection rate for the read cases [per thousand]")
-sum(df$cancer_DR[df$Mia_read_pre_fix == 1])/(sum(df$Mia_read_pre_fix))*1000
-
-print("Cancer detection rate for the cases not read [per thousand]")
-sum(df$cancer_DR[df$Mia_read_pre_fix == 0])/(sum(df$Mia_read_pre_fix == 0))*1000
-
-chisq.test(table(df$cancer_DR, df$Mia_read_pre_fix))
-
-```
-
-
 ## Minus AI exclusions
 
 ```{r}
