@@ -28,10 +28,18 @@ Finally, a sensitivity analysis was performed to assess whether the results show
 
 # Prepare data for evaluation
 
+## Create dummy data
+
+```{r}
+# generate a dummy data set called "data"
+source("create_dummy_data.R")
+```
+
 ## Load data
 
 ```{r load-data}
-data <- readRDS("evaluation_dataset.rds")
+## load data statement commented out so code can run with generated dummy data
+#data <- readRDS("evaluation_dataset.rds")
 
 ## stats functions
 source("calc-performance-functions.R")
