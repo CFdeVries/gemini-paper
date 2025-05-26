@@ -142,14 +142,16 @@ calc_SA_WF = function(df, OPs, scenario){
       R2_reads_col = "R2_read"
       R3_reads_col = "R3_read"
       workflow <- paste0("DR_XR_A", i)
+
+      performance <- calc_performance(df[[workflow]], df$cancer, df[[R2_reads_col]], df[[R3_reads_col]], df[[XR_read_col]])
     } else {
       workflow <- paste0(scenario, "_Mia_OP", i)
       XR_read_col <- NA
       R2_reads_col = paste0("R2_read_", workflow)
       R3_reads_col = paste0("R3_read_", workflow)
-      }
 
-    performance <- calc_performance(df[[workflow]], df$cancer, df[[R2_reads_col]], df[[R3_reads_col]], df[[XR_read_col]])
+      performance <- calc_performance(df[[workflow]], df$cancer, df[[R2_reads_col]], df[[R3_reads_col]])
+      }
     
     table <- rbind(table, performance)
   }
