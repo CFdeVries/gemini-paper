@@ -63,6 +63,7 @@ data <- data.frame(
 # consistency where it is possible and relatively straightforward, e.g. only
 # recalled cases can be diagnosed with a cancer
 ## Reader.3.opinion: third reader's recall opinion
+## DaSH550_AccessionNumber: unique identifier assigned to each screening session
 ## SBSS.Final.Decision: final screening decision
 ## Overall.opinion: overall screening opinion
 ## Discordance: cases eligible for additional human arbitration (XR: additionally (eXtra) Read)
@@ -101,6 +102,7 @@ data <- data %>%
   )) %>%
   ungroup() %>%
   mutate(
+    DaSH550_AccessionNumber = ID,
     SBSS.Final.Decision = case_when(
       Reader.1.opinion == "Technical Recall" |
         Reader.2.opinion == "Technical Recall" |
